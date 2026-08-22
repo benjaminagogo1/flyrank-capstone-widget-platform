@@ -1,0 +1,10 @@
+run: node server.js
+seed: create a widget with POST /widgets using Bearer demo-token
+test: npm test
+base_url: http://localhost:3000
+endpoints:
+  - /widgets
+  - /widgets/:id/config
+  - /submissions
+  - /dashboard/submissions
+  - /dashboard/stats

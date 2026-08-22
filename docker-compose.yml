@@ -1,0 +1,23 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      DATA_DIR: /app/data
+    volumes:
+      - widget-data:/app/data
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: widgets
+      POSTGRES_USER: widgets
+      POSTGRES_PASSWORD: widgets
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+volumes:
+  widget-data:
+  postgres-data:
