@@ -1,11 +1,13 @@
 {
-  "name": "embeddable-widget-platform",
-  "version": "1.0.0",
+  "name": "flyrank-capstone-widget-platform",
+  "version": "1.1.0",
   "private": true,
+  "type": "commonjs",
   "scripts": {
     "start": "node server.js",
     "test": "node --test",
-    "migrate": "node scripts/migrate.js"
+    "migrate": "node scripts/migrate.js",
+    "seed": "node scripts/seed.js"
   },
   "dependencies": {
     "pg": "^8.13.1"
