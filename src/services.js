@@ -1,478 +1,250 @@
 const crypto = require("crypto");
-
-const widgetRepository =
-  require("./repositories/widget_repository");
-
-const submissionRepository =
-  require("./repositories/submission_repository");
-
-const { enrichIp } =
-  require("./geo");
-
-const { enqueue } =
-  require("./jobs");
+const { state } = require("./store");
+const postgres = require("./postgres");
 
 const users = new Map([
-  [
-    "demo-token",
-    {
-      id: "tenant-demo",
-      email: "demo@example.com"
-    }
-  ],
-  [
-    "tenant-b-token",
-    {
-      id: "tenant-b",
-      email: "tenant-b@example.com"
-    }
-  ]
+["demo-token", { id: "tenant-demo" }],
+["tenant-b-token", { id: "tenant-b" }],
 ]);
 
 const limits = new Map();
 
 function userFromRequest(req) {
-  const authorization =
-    req.headers.authorization || "";
+const authorization = req.headers.authorization || "";
+const token = authorization.replace(/^Bearer\s+/i, "");
 
-  const token =
-    authorization.replace(/^Bearer\s+/i, "");
-
-  return users.get(token) || null;
+return users.get(token);
 }
 
-function validateOrigin(value) {
-  try {
-    new URL(value);
-    return true;
-  } catch {
-    return false;
-  }
+function validateWidget(body) {
+if (
+!body ||
+typeof body.title !== "string" ||
+!body.title.trim() ||
+body.title.length > 200
+) {
+return "title is required and must be <= 200 characters";
 }
 
-function validateField(field) {
-  if (
-    !field ||
-    typeof field !== "object"
-  ) {
-    return "Each field must be an object";
-  }
-
-  if (
-    typeof field.name !== "string" ||
-    !field.name.trim()
-  ) {
-    return "Each field requires a name";
-  }
-
-  if (
-    field.type !== undefined &&
-    typeof field.type !== "string"
-  ) {
-    return "Field type must be a string";
-  }
-
-  return null;
+if (
+body.description !== undefined &&
+typeof body.description !== "string"
+) {
+return "description must be a string";
 }
 
-function validateWidget(body, partial = false) {
-  if (!body || typeof body !== "object") {
-    return "Widget body is required";
-  }
-
-  if (
-    !partial ||
-    Object.prototype.hasOwnProperty.call(body, "title")
-  ) {
-    if (
-      typeof body.title !== "string" ||
-      !body.title.trim() ||
-      body.title.length > 200
-    ) {
-      return "title is required and must be <= 200 characters";
-    }
-  }
-
-  if (
-    body.description !== undefined &&
-    (
-      typeof body.description !== "string" ||
-      body.description.length > 2000
-    )
-  ) {
-    return "description must be a string of at most 2000 characters";
-  }
-
-  if (
-    body.buttonText !== undefined &&
-    (
-      typeof body.buttonText !== "string" ||
-      body.buttonText.length > 100
-    )
-  ) {
-    return "buttonText must be a string of at most 100 characters";
-  }
-
-  if (
-    body.type !== undefined &&
-    !["signup", "contact", "cta", "popover"].includes(
-      body.type
-    )
-  ) {
-    return "type must be signup, contact, cta, or popover";
-  }
-
-  if (body.fields !== undefined) {
-    if (
-      !Array.isArray(body.fields) ||
-      body.fields.length === 0 ||
-      body.fields.length > 20
-    ) {
-      return "fields must contain between 1 and 20 fields";
-    }
-
-    for (const field of body.fields) {
-      const error = validateField(field);
-
-      if (error) return error;
-    }
-  }
-
-  if (body.allowedOrigins !== undefined) {
-    if (
-      !Array.isArray(body.allowedOrigins) ||
-      body.allowedOrigins.length > 50
-    ) {
-      return "allowedOrigins must be an array of at most 50 origins";
-    }
-
-    if (
-      body.allowedOrigins.some(
-        origin =>
-          typeof origin !== "string" ||
-          !validateOrigin(origin)
-      )
-    ) {
-      return "allowedOrigins must contain valid origins";
-    }
-  }
-
-  return null;
+if (
+body.fields !== undefined &&
+(!Array.isArray(body.fields) || body.fields.length > 20)
+) {
+return "fields must be an array of at most 20 items";
 }
 
-function normalizeWidgetInput(body, current = null) {
-  return {
-    type:
-      body.type ??
-      current?.type ??
-      "signup",
+return null;
+}
 
-    title:
-      body.title?.trim() ??
-      current?.title,
+function createWidget(body, user) {
+const widget = {
+id: crypto.randomUUID(),
+tenantId: user.id,
+type: body.type || "signup",
+title: body.title.trim(),
+description: body.description || "",
+buttonText: body.buttonText || "Submit",
+fields: body.fields || ["email"],
+};
 
-    description:
-      body.description ??
-      current?.description ??
-      "",
+state.widgets[widget.id] = widget;
 
-    buttonText:
-      body.buttonText ??
-      current?.buttonText ??
-      "Submit",
+// persist();
 
-    fields:
-      body.fields ??
-      current?.fields ??
-      [
-        {
-          name: "email",
-          label: "Email",
-          type: "email",
-          required: true
-        }
-      ],
+return widget;
+}
 
-    allowedOrigins:
-      body.allowedOrigins ??
-      current?.allowedOrigins ??
-      []
-  };
+async function geo() {
+if (process.env.GEO_DOWN === "both") {
+return null;
+}
+
+if (process.env.GEO_DOWN === "primary") {
+return {
+provider: "ipapi.co",
+country: "Fallback",
+city: "Development",
+};
+}
+
+return {
+provider: "ip-api.com",
+country: "Local",
+city: "Development",
+};
 }
 
 function allowedSubmission(ip, widgetId) {
-  const windowMs = Number(
-    process.env.RATE_LIMIT_WINDOW_MS || 60000
-  );
+const key = `${ip}:${widgetId}`;
+const now = Date.now();
 
-  const max = Number(
-    process.env.RATE_LIMIT_MAX || 5
-  );
+const recent = (limits.get(key) || []).filter(
+(timestamp) => now - timestamp < 60000
+);
 
-  const key = `${ip}:${widgetId}`;
-  const now = Date.now();
-
-  const recent = (
-    limits.get(key) || []
-  ).filter(
-    timestamp =>
-      now - timestamp < windowMs
-  );
-
-  if (recent.length >= max) {
-    limits.set(key, recent);
-    return false;
-  }
-
-  recent.push(now);
-  limits.set(key, recent);
-
-  return true;
+if (recent.length >= 5) {
+return false;
 }
 
-function validateSubmission(body, widget) {
-  if (
-    !body ||
-    typeof body !== "object"
-  ) {
-    return "Request body is required";
-  }
+limits.set(key, [...recent, now]);
 
-  if (
-    !body.widgetId ||
-    typeof body.widgetId !== "string"
-  ) {
-    return "widgetId is required";
-  }
-
-  if (
-    !body.data ||
-    typeof body.data !== "object" ||
-    Array.isArray(body.data)
-  ) {
-    return "data must be an object";
-  }
-
-  if (body.data.website) {
-    return "Spam detected";
-  }
-
-  for (const field of widget.fields) {
-    if (!field.required) continue;
-
-    const value =
-      body.data[field.name];
-
-    if (
-      value === undefined ||
-      value === null ||
-      String(value).trim() === ""
-    ) {
-      return `${field.name} is required`;
-    }
-  }
-
-  if (
-    body.data.email !== undefined
-  ) {
-    const email = body.data.email;
-
-    if (
-      typeof email !== "string" ||
-      !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(
-        email
-      )
-    ) {
-      return "Valid email is required";
-    }
-  }
-
-  return null;
+return true;
 }
 
-function notificationJob(submission) {
-  enqueue({
-    name: `submission-notification-${submission.id}`,
-    maxAttempts: 3,
-
-    async run() {
-      if (
-        process.env.SIDE_EFFECT_DOWN === "1"
-      ) {
-        throw new Error(
-          "Notification service unavailable"
-        );
-      }
-
-      console.log(
-        "notification sent:",
-        submission.id
-      );
-    }
-  });
+function reset() {
+for (const key of Object.keys(state.widgets)) {
+delete state.widgets[key];
 }
 
-async function createWidget(body, user) {
-  const error =
-    validateWidget(body);
+state.submissions.length = 0;
 
-  if (error) {
-    const failure = new Error(error);
-    failure.status = 400;
-    throw failure;
-  }
+state.idempotency = {};
 
-  return widgetRepository.create(
-    normalizeWidgetInput(body),
-    user.id
-  );
+limits.clear();
+
+// persist();
 }
 
-async function updateWidget(
-  id,
-  tenantId,
-  body
+async function submit(body, req) {
+if (!state.idempotency) {
+state.idempotency = {};
+}
+
+if (
+!body ||
+!body.widgetId ||
+!body.data ||
+typeof body.data !== "object" ||
+Array.isArray(body.data)
 ) {
-  const current =
-    await widgetRepository.findById(id);
-
-  if (
-    !current ||
-    current.tenantId !== tenantId
-  ) {
-    return null;
-  }
-
-  const error =
-    validateWidget(body, true);
-
-  if (error) {
-    const failure = new Error(error);
-    failure.status = 400;
-    throw failure;
-  }
-
-  return widgetRepository.update(
-    id,
-    tenantId,
-    normalizeWidgetInput(
-      body,
-      current
-    )
-  );
+return {
+httpStatus: 400,
+error: "widgetId and data are required",
+};
 }
 
-async function submit(body, req, geoProviders) {
-  const widget =
-    await widgetRepository.findById(
-      body?.widgetId
-    );
+const widget = state.widgets[body.widgetId];
 
-  if (!widget) {
-    return {
-      httpStatus: 404,
-      error: "Widget not found"
-    };
-  }
-
-  const validationError =
-    validateSubmission(body, widget);
-
-  if (validationError) {
-    return {
-      httpStatus: 400,
-      error: validationError
-    };
-  }
-
-  const ip =
-    (
-      req.headers["x-forwarded-for"] ||
-      req.socket.remoteAddress ||
-      "unknown"
-    )
-      .toString()
-      .split(",")[0]
-      .trim();
-
-  if (
-    !allowedSubmission(
-      ip,
-      widget.id
-    )
-  ) {
-    return {
-      httpStatus: 429,
-      error: "Rate limit exceeded"
-    };
-  }
-
-  const idempotencyKey =
-    req.headers["idempotency-key"];
-
-  if (idempotencyKey) {
-    const previous =
-      await submissionRepository
-        .findByIdempotency(
-          widget.id,
-          idempotencyKey
-        );
-
-    if (previous) {
-      return {
-        httpStatus: 200,
-        id: previous.id,
-        status: "accepted",
-        geo: previous.geo,
-        idempotent: true
-      };
-    }
-  }
-
-  const geo =
-    await enrichIp(
-      ip,
-      geoProviders
-    );
-
-  const submission = {
-    id: crypto.randomUUID(),
-    widgetId: widget.id,
-    tenantId: widget.tenantId,
-    data: body.data,
-    ip,
-    geo,
-    createdAt:
-      new Date().toISOString()
-  };
-
-  const stored =
-    await submissionRepository.create(
-      submission,
-      idempotencyKey
-    );
-
-  notificationJob(stored);
-
-  return {
-    httpStatus: 201,
-    id: stored.id,
-    status: "accepted",
-    geo: stored.geo
-  };
+if (!widget) {
+return {
+httpStatus: 404,
+error: "Widget not found",
+};
 }
 
-function resetRateLimits() {
-  limits.clear();
+if (body.data.website) {
+return {
+httpStatus: 400,
+error: "Spam detected",
+};
+}
+
+const email = body.data.email;
+
+if (
+typeof email !== "string" ||
+!/^[^@\s]+@[^@\s]+.[^@\s]+$/.test(email)
+) {
+return {
+httpStatus: 400,
+error: "Valid email is required",
+};
+}
+
+const ip = req.socket.remoteAddress || "unknown";
+
+if (!allowedSubmission(ip, widget.id)) {
+return {
+httpStatus: 429,
+error: "Rate limit exceeded",
+};
+}
+
+const idempotencyKey = req.headers["idempotency-key"];
+
+if (
+idempotencyKey &&
+state.idempotency[`${widget.id}:${idempotencyKey}`]
+) {
+return {
+httpStatus: 200,
+...state.idempotency[
+`${widget.id}:${idempotencyKey}`
+],
+idempotent: true,
+};
+}
+
+const submission = {
+id: crypto.randomUUID(),
+widgetId: widget.id,
+tenantId: widget.tenantId,
+data: body.data,
+ip,
+geo: await geo(),
+createdAt: new Date().toISOString(),
+};
+
+state.submissions.push(submission);
+
+const result = {
+id: submission.id,
+status: "accepted",
+geo: submission.geo,
+};
+
+if (idempotencyKey) {
+state.idempotency[
+`${widget.id}:${idempotencyKey}`
+] = result;
+}
+
+// persist();
+
+if (postgres.enabled()) {
+postgres
+.insertSubmission(submission)
+.catch((error) => {
+console.error(
+"postgres persistence failed",
+error.message
+);
+});
+}
+
+setImmediate(() => {
+if (process.env.SIDE_EFFECT_DOWN === "1") {
+console.error(
+"notification failed",
+submission.id
+);
+} else {
+console.log(
+"notification",
+submission.id
+);
+}
+});
+
+return {
+httpStatus: 201,
+...result,
+};
 }
 
 module.exports = {
-  users,
-  userFromRequest,
-  validateWidget,
-  createWidget,
-  updateWidget,
-  submit,
-  allowedSubmission,
-  resetRateLimits
+state,
+users,
+userFromRequest,
+validateWidget,
+createWidget,
+submit,
+reset,
 };

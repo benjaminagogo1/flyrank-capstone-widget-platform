@@ -520,11 +520,9 @@ async function handler(
       );
     }
 
-    const configMatch =
-      path.match(
-        /^\\/widgets\\/([^/]+)\\/config$/
-      );
-
+    const configMatch = path.match(
+      /^\/widgets\/([^/]+)\/config$/
+    );
     if (
       configMatch &&
       request.method === "GET"
@@ -632,11 +630,9 @@ async function handler(
       );
     }
 
-    const widgetMatch =
-      path.match(
-        /^\\/widgets\\/([^/]+)$/
-      );
-
+    const widgetMatch = path.match(
+      /^\/widgets\/([^/]+)$/
+    );
     if (widgetMatch) {
       const user =
         authenticate(
