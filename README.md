@@ -20,6 +20,7 @@ break the accepted submission.
 The service provides authenticated widget CRUD (`Bearer demo-token`), a cacheable public config endpoint, a versioned-style widget script, CORS-enabled submissions, validation, honeypot spam protection, per-IP/widget rate limiting, geo-provider fallback simulation, non-blocking notifications, and owner dashboard stats. Data is intentionally in memory for a zero-dependency demo.
 
 Create a widget:
+
 ```sh
 curl -X POST http://localhost:3000/widgets -H 'Authorization: Bearer demo-token' -H 'Content-Type: application/json' -d '{"title":"Join us","description":"Get updates","buttonText":"Sign up"}'
 ```

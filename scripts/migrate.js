@@ -1,2 +1,38 @@
-const fs=require('fs'),path=require('path'),{Client}=require('pg');
-async function main(){if(!process.env.DATABASE_URL)throw Error('DATABASE_URL is required');const c=new Client({connectionString:process.env.DATABASE_URL});await c.connect();await c.query('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())');for(const n of fs.readdirSync(path.join(__dirname,'..','migrations')).filter(x=>x.endsWith('.sql')).sort()){if((await c.query('SELECT 1 FROM schema_migrations WHERE name=$1',[n])).rowCount)continue;await c.query('BEGIN');try{await c.query(fs.readFileSync(path.join(__dirname,'..','migrations',n),'utf8'));await c.query('INSERT INTO schema_migrations(name) VALUES($1)',[n]);await c.query('COMMIT');console.log(`applied ${n}`)}catch(e){await c.query('ROLLBACK');throw e}}await c.end()}main().catch(e=>{console.error(e.message);process.exitCode=1});
+const fs = require("fs"),
+  path = require("path"),
+  { Client } = require("pg");
+async function main() {
+  if (!process.env.DATABASE_URL) throw Error("DATABASE_URL is required");
+  const c = new Client({ connectionString: process.env.DATABASE_URL });
+  await c.connect();
+  await c.query(
+    "CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+  );
+  for (const n of fs
+    .readdirSync(path.join(__dirname, "..", "migrations"))
+    .filter((x) => x.endsWith(".sql"))
+    .sort()) {
+    if (
+      (await c.query("SELECT 1 FROM schema_migrations WHERE name=$1", [n]))
+        .rowCount
+    )
+      continue;
+    await c.query("BEGIN");
+    try {
+      await c.query(
+        fs.readFileSync(path.join(__dirname, "..", "migrations", n), "utf8"),
+      );
+      await c.query("INSERT INTO schema_migrations(name) VALUES($1)", [n]);
+      await c.query("COMMIT");
+      console.log(`applied ${n}`);
+    } catch (e) {
+      await c.query("ROLLBACK");
+      throw e;
+    }
+  }
+  await c.end();
+}
+main().catch((e) => {
+  console.error(e.message);
+  process.exitCode = 1;
+});

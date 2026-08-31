@@ -4,13 +4,11 @@ Implemented the initial platform with AI assistance. Reviewed and simplified the
 
 Refactor: AI helped identify gaps against the capstone PDF and draft the HTTP/service/store separation. I retained Node rather than switching stacks, replaced volatile storage with a file-backed persistence adapter, added a second tenant, idempotency, asynchronous notification handling, boundary validation, and acceptance tests. The generated first server patch needed manual correction because it did not match the existing one-line file and the sandbox prevented TCP-based tests from binding locally.
 
-
-
 ---
 
 # 2. `BUILDLOG.md`
 
-```markdown
+````markdown
 # BUILDLOG.md
 
 # FlyRank Capstone — AI-Assisted Development Log
@@ -88,3 +86,5 @@ Repository/Data Layer
       |
       v
 PostgreSQL
+```
+````
