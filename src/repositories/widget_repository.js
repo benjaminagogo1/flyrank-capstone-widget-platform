@@ -1,27 +1,76 @@
 const crypto = require("crypto");
-const { state, persist } = require("../store");
 const postgres = require("../postgres");
+const { state } = require("../store");
+
+function normalize(row) {
+  if (!row) return null;
+
+  return {
+    id: row.id,
+    tenantId: row.tenant_id ?? row.tenantId,
+    type: row.type,
+    title: row.title,
+    description: row.description,
+    buttonText: row.button_text ?? row.buttonText,
+    fields: typeof row.fields === "string"
+      ? JSON.parse(row.fields)
+      : row.fields,
+    allowedOrigins: typeof row.allowed_origins === "string"
+      ? JSON.parse(row.allowed_origins)
+      : (row.allowed_origins ?? row.allowedOrigins ?? [])
+  };
+}
 
 class WidgetRepository {
   async listByTenant(tenantId) {
     if (postgres.enabled()) {
-      const rows = await postgres.query(
-        'SELECT id, tenant_id AS "tenantId", type, title, description, button_text AS "buttonText", fields FROM widgets WHERE tenant_id=$1 ORDER BY created_at DESC',
-        [tenantId],
+      const result = await postgres.query(
+        `
+        SELECT
+          id,
+          tenant_id,
+          type,
+          title,
+          description,
+          button_text,
+          fields,
+          allowed_origins
+        FROM widgets
+        WHERE tenant_id = $1
+        ORDER BY created_at DESC
+        `,
+        [tenantId]
       );
-      return rows;
+
+      return result.rows.map(normalize);
     }
-    return Object.values(state.widgets).filter((w) => w.tenantId === tenantId);
+
+    return Object.values(state.widgets)
+      .filter(widget => widget.tenantId === tenantId);
   }
 
   async findById(id) {
     if (postgres.enabled()) {
-      const rows = await postgres.query(
-        'SELECT id, tenant_id AS "tenantId", type, title, description, button_text AS "buttonText", fields FROM widgets WHERE id=$1',
-        [id],
+      const result = await postgres.query(
+        `
+        SELECT
+          id,
+          tenant_id,
+          type,
+          title,
+          description,
+          button_text,
+          fields,
+          allowed_origins
+        FROM widgets
+        WHERE id = $1
+        `,
+        [id]
       );
-      return rows[0] || null;
+
+      return normalize(result.rows[0]);
     }
+
     return state.widgets[id] || null;
   }
 
@@ -29,67 +78,117 @@ class WidgetRepository {
     const widget = {
       id: crypto.randomUUID(),
       tenantId,
-      type: input.type || "signup",
-      title: input.title.trim(),
-      description: input.description || "",
-      buttonText: input.buttonText || "Submit",
-      fields: input.fields || ["email"],
+      type: input.type,
+      title: input.title,
+      description: input.description,
+      buttonText: input.buttonText,
+      fields: input.fields,
+      allowedOrigins: input.allowedOrigins
     };
+
     if (postgres.enabled()) {
-      await postgres.query(
-        "INSERT INTO widgets (id, tenant_id, type, title, description, button_text, fields) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+      const result = await postgres.query(
+        `
+        INSERT INTO widgets (
+          id,
+          tenant_id,
+          type,
+          title,
+          description,
+          button_text,
+          fields,
+          allowed_origins
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        RETURNING *
+        `,
         [
           widget.id,
-          tenantId,
+          widget.tenantId,
           widget.type,
           widget.title,
           widget.description,
           widget.buttonText,
           JSON.stringify(widget.fields),
-        ],
+          JSON.stringify(widget.allowedOrigins)
+        ]
       );
-      return widget;
+
+      return normalize(result.rows[0]);
     }
+
     state.widgets[widget.id] = widget;
-    persist();
     return widget;
   }
 
-  async update(id, input) {
+  async update(id, tenantId, input) {
     const current = await this.findById(id);
-    if (!current) return null;
+
+    if (!current || current.tenantId !== tenantId) {
+      return null;
+    }
+
     const next = {
       ...current,
       ...input,
       id: current.id,
-      tenantId: current.tenantId,
+      tenantId: current.tenantId
     };
+
     if (postgres.enabled()) {
-      await postgres.query(
-        "UPDATE widgets SET type=$2,title=$3,description=$4,button_text=$5,fields=$6 WHERE id=$1",
+      const result = await postgres.query(
+        `
+        UPDATE widgets
+        SET
+          type = $3,
+          title = $4,
+          description = $5,
+          button_text = $6,
+          fields = $7,
+          allowed_origins = $8
+        WHERE id = $1 AND tenant_id = $2
+        RETURNING *
+        `,
         [
           id,
+          tenantId,
           next.type,
           next.title,
           next.description,
           next.buttonText,
           JSON.stringify(next.fields),
-        ],
+          JSON.stringify(next.allowedOrigins)
+        ]
       );
-      return next;
+
+      return normalize(result.rows[0]);
     }
+
     state.widgets[id] = next;
-    persist();
     return next;
   }
 
-  async remove(id) {
+  async remove(id, tenantId) {
     if (postgres.enabled()) {
-      await postgres.query("DELETE FROM widgets WHERE id=$1", [id]);
-      return;
+      const result = await postgres.query(
+        `
+        DELETE FROM widgets
+        WHERE id = $1 AND tenant_id = $2
+        `,
+        [id, tenantId]
+      );
+
+      return result.rowCount > 0;
     }
+
+    const widget = state.widgets[id];
+
+    if (!widget || widget.tenantId !== tenantId) {
+      return false;
+    }
+
     delete state.widgets[id];
-    persist();
+    return true;
   }
 }
 
