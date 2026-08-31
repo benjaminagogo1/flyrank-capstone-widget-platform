@@ -1,186 +1,877 @@
 const http = require("http");
 const { URL } = require("url");
+
+const postgres =
+  require("./src/postgres");
+
+const widgetRepository =
+  require("./src/repositories/widget_repository");
+
+const submissionRepository =
+  require("./src/repositories/submission_repository");
+
 const {
-  state,
   userFromRequest,
-  validateWidget,
   createWidget,
-  submit,
+  updateWidget,
+  submit
 } = require("./src/services");
-const PORT = Number(process.env.PORT || 3000),
-  V = "v1";
-const json = (r, s, b, h = {}) => {
-  r.writeHead(s, { "Content-Type": "application/json", ...h });
-  r.end(JSON.stringify(b));
-};
-const body = (q) =>
-  new Promise((ok, no) => {
-    let x = "";
-    q.on("data", (c) => {
-      x += c;
-      if (x.length > 10000)
-        no(Object.assign(Error("Payload too large"), { status: 413 }));
-    });
-    q.on("end", () => {
-      try {
-        ok(x ? JSON.parse(x) : {});
-      } catch {
-        no(Object.assign(Error("Invalid JSON"), { status: 400 }));
-      }
-    });
+
+const PORT =
+  Number(process.env.PORT || 3000);
+
+const VERSION = "v1";
+
+const MAX_BODY_BYTES = 10_000;
+
+function json(
+  response,
+  status,
+  body,
+  headers = {}
+) {
+  response.writeHead(status, {
+    "Content-Type":
+      "application/json; charset=utf-8",
+    ...headers
   });
-const cors = (r, o) => {
-  if (o) r.setHeader("Access-Control-Allow-Origin", o);
-  r.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, Idempotency-Key",
+
+  response.end(
+    JSON.stringify(body)
   );
-  r.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
-};
-const auth = (q, r) => {
-  const u = userFromRequest(q);
-  if (!u) {
-    json(r, 401, { error: "Unauthorized" });
+}
+
+function readBody(request) {
+  return new Promise(
+    (resolve, reject) => {
+      let chunks = [];
+      let size = 0;
+      let finished = false;
+
+      request.on(
+        "data",
+        chunk => {
+          if (finished) return;
+
+          size += chunk.length;
+
+          if (
+            size > MAX_BODY_BYTES
+          ) {
+            finished = true;
+
+            reject(
+              Object.assign(
+                new Error(
+                  "Payload too large"
+                ),
+                {
+                  status: 413
+                }
+              )
+            );
+
+            request.resume();
+            return;
+          }
+
+          chunks.push(chunk);
+        }
+      );
+
+      request.on(
+        "end",
+        () => {
+          if (finished) return;
+
+          const text =
+            Buffer.concat(
+              chunks
+            ).toString("utf8");
+
+          if (!text) {
+            resolve({});
+            return;
+          }
+
+          try {
+            resolve(
+              JSON.parse(text)
+            );
+          } catch {
+            reject(
+              Object.assign(
+                new Error(
+                  "Invalid JSON"
+                ),
+                {
+                  status: 400
+                }
+              )
+            );
+          }
+        }
+      );
+
+      request.on(
+        "error",
+        reject
+      );
+    }
+  );
+}
+
+function globalAllowedOrigins() {
+  return (
+    process.env.ALLOWED_ORIGINS ||
+    "http://localhost:4000,http://127.0.0.1:4000"
+  )
+    .split(",")
+    .map(value =>
+      value.trim()
+    )
+    .filter(Boolean);
+}
+
+function isOriginAllowed(
+  origin,
+  widget = null
+) {
+  if (!origin) return false;
+
+  if (
+    widget &&
+    widget.allowedOrigins &&
+    widget.allowedOrigins.length > 0
+  ) {
+    return widget.allowedOrigins.includes(
+      origin
+    );
+  }
+
+  return globalAllowedOrigins().includes(
+    origin
+  );
+}
+
+function applyCors(
+  response,
+  origin,
+  widget
+) {
+  if (
+    isOriginAllowed(
+      origin,
+      widget
+    )
+  ) {
+    response.setHeader(
+      "Access-Control-Allow-Origin",
+      origin
+    );
+
+    response.setHeader(
+      "Vary",
+      "Origin"
+    );
+  }
+
+  response.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, Idempotency-Key"
+  );
+
+  response.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, PUT, DELETE, OPTIONS"
+  );
+}
+
+function authenticate(
+  request,
+  response
+) {
+  const user =
+    userFromRequest(request);
+
+  if (!user) {
+    json(
+      response,
+      401,
+      {
+        error: "Unauthorized"
+      }
+    );
+
     return null;
   }
-  return u;
-};
-function script(id, origin) {
-  return `(async()=>{const c=await fetch('${origin}/widgets/${id}/config').then(r=>r.json());const d=document.createElement('div');d.innerHTML='<h3>'+c.title+'</h3><p>'+c.description+'</p><form><input name="email" type="email" required><input name="name" required><input name="website" style="display:none"><button>'+c.buttonText+'</button></form>';document.getElementById('widget').append(d);d.querySelector('form').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);const r=await fetch('${origin}/submissions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({widgetId:'${id}',data:Object.fromEntries(f)})});e.target.innerHTML=r.ok?'<b>Thanks!</b>':'<b>Unable to submit</b>'}})()`;
+
+  return user;
 }
-function handler(q, r) {
-  const u = new URL(q.url, `http://${q.headers.host || "localhost"}`),
-    p = u.pathname;
-  cors(r, q.headers.origin);
-  if (q.method === "OPTIONS") return r.writeHead(204).end();
-  if (p === "/health") return json(r, 200, { ok: true });
-  if (p === "/customer.html") {
-    r.writeHead(200, { "Content-Type": "text/html" });
-    return r.end(
-      `<!doctype html><main id="widget"></main><script src="/widget-v1.js?id=${u.searchParams.get("id") || ""}"></script>`,
-    );
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function widgetScript(
+  id,
+  origin
+) {
+  return `
+(async function () {
+  const root = document.getElementById("widget");
+
+  if (!root) {
+    console.error("Widget root element #widget not found");
+    return;
   }
-  if (p === `/widget-${V}.js` || p === "/widget.js") {
-    r.writeHead(200, {
-      "Content-Type": "application/javascript",
-      "Cache-Control": "public,max-age=31536000,immutable",
-    });
-    return r.end(
-      script(
-        u.searchParams.get("id"),
-        `http://localhost:${q.headers.host || PORT}`,
-      ),
-    );
-  }
-  let m = p.match(/^\/widgets\/([^/]+)\/config$/);
-  if (m && q.method === "GET") {
-    const w = state.widgets[m[1]];
-    return w
-      ? json(
-          r,
-          200,
-          {
-            id: w.id,
-            title: w.title,
-            description: w.description,
-            buttonText: w.buttonText,
-            fields: w.fields,
-          },
-          { "Cache-Control": "public,max-age=60" },
-        )
-      : json(r, 404, { error: "Widget not found" });
-  }
-  if (p === "/widgets" && q.method === "GET") {
-    const z = auth(q, r);
-    if (!z) return;
-    return json(
-      r,
-      200,
-      Object.values(state.widgets).filter((w) => w.tenantId === z.id),
-    );
-  }
-  if (p === "/widgets" && q.method === "POST")
-    return body(q)
-      .then((b) => {
-        const z = auth(q, r);
-        if (!z) return;
-        const e = validateWidget(b);
-        if (e) return json(r, 400, { error: e });
-        const w = createWidget(b, z);
-        json(r, 201, {
-          ...w,
-          snippet: `<script src="http://localhost:${PORT}/widget-${V}.js?id=${w.id}"></script>`,
-        });
-      })
-      .catch((e) => json(r, e.status || 400, { error: e.message }));
-  m = p.match(/^\/widgets\/([^/]+)$/);
-  if (m) {
-    const w = state.widgets[m[1]],
-      z = auth(q, r);
-    if (!z) return;
-    if (!w || w.tenantId !== z.id)
-      return json(r, 404, { error: "Widget not found" });
-    if (q.method === "GET") return json(r, 200, w);
-    if (q.method === "PUT")
-      return body(q).then((b) => {
-        Object.assign(w, b);
-        require("./src/store").persist();
-        json(r, 200, w);
-      });
-    if (q.method === "DELETE") {
-      delete state.widgets[w.id];
-      require("./src/store").persist();
-      return r.writeHead(204).end();
+
+  try {
+    const configResponse =
+      await fetch(
+        "${origin}/widgets/${id}/config"
+      );
+
+    if (!configResponse.ok) {
+      throw new Error(
+        "Unable to load widget configuration"
+      );
     }
-  }
-  if (p === "/submissions" && q.method === "POST")
-    return body(q)
-      .then((b) => submit(b, q))
-      .then((x) => json(r, x.httpStatus, { ...x, httpStatus: undefined }))
-      .catch((e) => json(r, e.status || 400, { error: e.message }));
-  if (p === "/dashboard/submissions" && q.method === "GET") {
-    const z = auth(q, r);
-    if (!z) return;
-    return json(
-      r,
-      200,
-      state.submissions.filter((s) => s.tenantId === z.id),
+
+    const config =
+      await configResponse.json();
+
+    const wrapper =
+      document.createElement("div");
+
+    const title =
+      document.createElement("h3");
+
+    title.textContent =
+      config.title;
+
+    wrapper.appendChild(title);
+
+    if (config.description) {
+      const description =
+        document.createElement("p");
+
+      description.textContent =
+        config.description;
+
+      wrapper.appendChild(
+        description
+      );
+    }
+
+    const form =
+      document.createElement("form");
+
+    for (
+      const field of config.fields
+    ) {
+      const input =
+        document.createElement(
+          "input"
+        );
+
+      input.name =
+        field.name;
+
+      input.type =
+        field.type ||
+        "text";
+
+      input.placeholder =
+        field.label ||
+        field.name;
+
+      input.required =
+        Boolean(field.required);
+
+      form.appendChild(input);
+    }
+
+    const honeypot =
+      document.createElement(
+        "input"
+      );
+
+    honeypot.name =
+      "website";
+
+    honeypot.type =
+      "text";
+
+    honeypot.autocomplete =
+      "off";
+
+    honeypot.tabIndex =
+      -1;
+
+    honeypot.setAttribute(
+      "aria-hidden",
+      "true"
     );
+
+    honeypot.style.display =
+      "none";
+
+    form.appendChild(
+      honeypot
+    );
+
+    const button =
+      document.createElement(
+        "button"
+      );
+
+    button.type =
+      "submit";
+
+    button.textContent =
+      config.buttonText;
+
+    form.appendChild(
+      button
+    );
+
+    form.addEventListener(
+      "submit",
+      async function (event) {
+        event.preventDefault();
+
+        const data =
+          Object.fromEntries(
+            new FormData(form)
+          );
+
+        try {
+          const response =
+            await fetch(
+              "${origin}/submissions",
+              {
+                method: "POST",
+
+                headers: {
+                  "Content-Type":
+                    "application/json"
+                },
+
+                body: JSON.stringify({
+                  widgetId: config.id,
+                  data
+                })
+              }
+            );
+
+          if (!response.ok) {
+            throw new Error(
+              "Submission failed"
+            );
+          }
+
+          form.innerHTML =
+            "<strong>Thanks! Your submission was received.</strong>";
+        } catch (error) {
+          form.innerHTML =
+            "<strong>Unable to submit. Please try again.</strong>";
+        }
+      }
+    );
+
+    wrapper.appendChild(
+      form
+    );
+
+    root.replaceChildren(
+      wrapper
+    );
+  } catch (error) {
+    root.textContent =
+      "Widget unavailable";
   }
-  if (p === "/dashboard/stats" && q.method === "GET") {
-    const z = auth(q, r);
-    if (!z) return;
-    const a = state.submissions.filter((s) => s.tenantId === z.id);
-    return json(r, 200, {
-      total: a.length,
-      perWidget: a.reduce(
-        (x, s) => ((x[s.widgetId] = (x[s.widgetId] || 0) + 1), x),
-        {},
-      ),
-      geo: a.reduce((x, s) => {
-        const k = s.geo?.country || "unknown";
-        x[k] = (x[k] || 0) + 1;
-        return x;
-      }, {}),
-    });
-  }
-  json(r, 404, { error: "Not found" });
+})();
+`;
 }
-if (require.main === module)
-  http
-    .createServer(handler)
-    .listen(PORT, () =>
-      console.log(`Widget platform listening on http://localhost:${PORT}`),
+
+async function handler(
+  request,
+  response
+) {
+  try {
+    const url =
+      new URL(
+        request.url,
+        `http://${request.headers.host || "localhost"}`
+      );
+
+    const path =
+      url.pathname;
+
+    if (
+      path === "/health"
+    ) {
+      return json(
+        response,
+        200,
+        {
+          ok: true,
+          postgres:
+            postgres.enabled()
+              ? await postgres.health()
+              : false
+        }
+      );
+    }
+
+    if (
+      request.method === "OPTIONS"
+    ) {
+      const widgetId =
+        url.searchParams.get(
+          "widgetId"
+        );
+
+      const widget =
+        widgetId
+          ? await widgetRepository
+            .findById(widgetId)
+          : null;
+
+      applyCors(
+        response,
+        request.headers.origin,
+        widget
+      );
+
+      return response
+        .writeHead(204)
+        .end();
+    }
+
+    if (
+      path === "/widget-v1.js" ||
+      path === "/widget.js"
+    ) {
+      const id =
+        url.searchParams.get(
+          "id"
+        );
+
+      const origin =
+        `http://${request.headers.host || `localhost:${PORT}`}`;
+
+      response.writeHead(
+        200,
+        {
+          "Content-Type":
+            "application/javascript; charset=utf-8",
+
+          "Cache-Control":
+            "public, max-age=31536000, immutable"
+        }
+      );
+
+      return response.end(
+        widgetScript(
+          id,
+          origin
+        )
+      );
+    }
+
+    if (
+      path === "/customer.html"
+    ) {
+      const id =
+        url.searchParams.get(
+          "id"
+        ) || "";
+
+      response.writeHead(
+        200,
+        {
+          "Content-Type":
+            "text/html; charset=utf-8"
+        }
+      );
+
+      return response.end(
+        `
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Customer Site</title>
+</head>
+<body>
+  <h1>Customer Website</h1>
+  <main id="widget"></main>
+  <script src="/widget-v1.js?id=${escapeHtml(id)}"></script>
+</body>
+</html>
+`
+      );
+    }
+
+    const configMatch =
+      path.match(
+        /^\\/widgets\\/([^/]+)\\/config$/
+      );
+
+    if (
+      configMatch &&
+      request.method === "GET"
+    ) {
+      const widget =
+        await widgetRepository
+          .findById(
+            configMatch[1]
+          );
+
+      if (!widget) {
+        return json(
+          response,
+          404,
+          {
+            error:
+              "Widget not found"
+          }
+        );
+      }
+
+      applyCors(
+        response,
+        request.headers.origin,
+        widget
+      );
+
+      return json(
+        response,
+        200,
+        {
+          id: widget.id,
+          type: widget.type,
+          title: widget.title,
+          description:
+            widget.description,
+          buttonText:
+            widget.buttonText,
+          fields:
+            widget.fields
+        },
+        {
+          "Cache-Control":
+            "public, max-age=60"
+        }
+      );
+    }
+
+    if (
+      path === "/widgets" &&
+      request.method === "GET"
+    ) {
+      const user =
+        authenticate(
+          request,
+          response
+        );
+
+      if (!user) return;
+
+      const widgets =
+        await widgetRepository
+          .listByTenant(
+            user.id
+          );
+
+      return json(
+        response,
+        200,
+        widgets
+      );
+    }
+
+    if (
+      path === "/widgets" &&
+      request.method === "POST"
+    ) {
+      const user =
+        authenticate(
+          request,
+          response
+        );
+
+      if (!user) return;
+
+      const body =
+        await readBody(
+          request
+        );
+
+      const widget =
+        await createWidget(
+          body,
+          user
+        );
+
+      return json(
+        response,
+        201,
+        {
+          ...widget,
+          snippet:
+            `<script src="http://localhost:${PORT}/widget-${VERSION}.js?id=${widget.id}"></script>`
+        }
+      );
+    }
+
+    const widgetMatch =
+      path.match(
+        /^\\/widgets\\/([^/]+)$/
+      );
+
+    if (widgetMatch) {
+      const user =
+        authenticate(
+          request,
+          response
+        );
+
+      if (!user) return;
+
+      const id =
+        widgetMatch[1];
+
+      if (
+        request.method === "GET"
+      ) {
+        const widget =
+          await widgetRepository
+            .findById(id);
+
+        if (
+          !widget ||
+          widget.tenantId !== user.id
+        ) {
+          return json(
+            response,
+            404,
+            {
+              error:
+                "Widget not found"
+            }
+          );
+        }
+
+        return json(
+          response,
+          200,
+          widget
+        );
+      }
+
+      if (
+        request.method === "PUT"
+      ) {
+        const body =
+          await readBody(
+            request
+          );
+
+        const widget =
+          await updateWidget(
+            id,
+            user.id,
+            body
+          );
+
+        if (!widget) {
+          return json(
+            response,
+            404,
+            {
+              error:
+                "Widget not found"
+            }
+          );
+        }
+
+        return json(
+          response,
+          200,
+          widget
+        );
+      }
+
+      if (
+        request.method === "DELETE"
+      ) {
+        const deleted =
+          await widgetRepository
+            .remove(
+              id,
+              user.id
+            );
+
+        if (!deleted) {
+          return json(
+            response,
+            404,
+            {
+              error:
+                "Widget not found"
+            }
+          );
+        }
+
+        return response
+          .writeHead(204)
+          .end();
+      }
+    }
+
+    if (
+      path === "/submissions" &&
+      request.method === "POST"
+    ) {
+      const body =
+        await readBody(
+          request
+        );
+
+      const widget =
+        await widgetRepository
+          .findById(
+            body?.widgetId
+          );
+
+      applyCors(
+        response,
+        request.headers.origin,
+        widget
+      );
+
+      const result =
+        await submit(
+          body,
+          request
+        );
+
+      const {
+        httpStatus,
+        ...payload
+      } = result;
+
+      return json(
+        response,
+        httpStatus,
+        payload
+      );
+    }
+
+    if (
+      path ===
+        "/dashboard/submissions" &&
+      request.method === "GET"
+    ) {
+      const user =
+        authenticate(
+          request,
+          response
+        );
+
+      if (!user) return;
+
+      const submissions =
+        await submissionRepository
+          .listByTenant(
+            user.id
+          );
+
+      return json(
+        response,
+        200,
+        submissions
+      );
+    }
+
+    if (
+      path ===
+        "/dashboard/stats" &&
+      request.method === "GET"
+    ) {
+      const user =
+        authenticate(
+          request,
+          response
+        );
+
+      if (!user) return;
+
+      const stats =
+        await submissionRepository
+          .statsByTenant(
+            user.id
+          );
+
+      return json(
+        response,
+        200,
+        stats
+      );
+    }
+
+    return json(
+      response,
+      404,
+      {
+        error:
+          "Not found"
+      }
     );
-module.exports = { state, handler };
-const db = {
-  widgets: {
-    clear() {
-      state.widgets = {};
-    },
-    values() {
-      return Object.values(state.widgets);
-    },
-  },
-  submissions: state.submissions,
+  } catch (error) {
+    console.error(
+      "request failed:",
+      error
+    );
+
+    return json(
+      response,
+      error.status || 500,
+      {
+        error:
+          error.status
+            ? error.message
+            : "Internal server error"
+      }
+    );
+  }
+}
+
+if (
+  require.main === module
+) {
+  http
+    .createServer(
+      handler
+    )
+    .listen(
+      PORT,
+      () => {
+        console.log(
+          `Widget platform listening on http://localhost:${PORT}`
+        );
+      }
+    );
+}
+
+module.exports = {
+  handler
 };

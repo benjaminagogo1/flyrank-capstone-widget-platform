@@ -1,13 +1,4 @@
 services:
-  app:
-    build: .
-    ports:
-      - "3000:3000"
-    environment:
-      PORT: 3000
-      DATA_DIR: /app/data
-    volumes:
-      - widget-data:/app/data
   postgres:
     image: postgres:16-alpine
     environment:
@@ -16,8 +7,34 @@ services:
       POSTGRES_PASSWORD: widgets
     ports:
       - "5432:5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U widgets -d widgets
+      interval: 5s
+      timeout: 5s
+      retries: 10
     volumes:
       - postgres-data:/var/lib/postgresql/data
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgresql://widgets:widgets@postgres:5432/widgets
+      ALLOWED_ORIGINS: http://localhost:4000,http://127.0.0.1:4000
+    ports:
+      - "3000:3000"
+    command:
+      - sh
+      - -c
+      - |
+        npm run migrate
+        npm run seed
+        npm start
+
 volumes:
-  widget-data:
   postgres-data:
