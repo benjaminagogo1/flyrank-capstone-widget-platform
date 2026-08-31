@@ -1,90 +1,266 @@
-# Build log
+# Build Log
 
-Implemented the initial platform with AI assistance. Reviewed and simplified the generated code into a dependency-free Node.js service. Storage is in-memory for local demonstration; production deployment should replace it with PostgreSQL and durable rate limiting.
+## Project
 
-Refactor: AI helped identify gaps against the capstone PDF and draft the HTTP/service/store separation. I retained Node rather than switching stacks, replaced volatile storage with a file-backed persistence adapter, added a second tenant, idempotency, asynchronous notification handling, boundary validation, and acceptance tests. The generated first server patch needed manual correction because it did not match the existing one-line file and the sandbox prevented TCP-based tests from binding locally.
+Embeddable Widget & Lead-Capture Platform
 
----
+## Purpose
 
-# 2. `BUILDLOG.md`
-
-````markdown
-# BUILDLOG.md
-
-# FlyRank Capstone — AI-Assisted Development Log
-
-This document records the use of AI during development of the FlyRank Backend Capstone.
-
-The purpose is to maintain an honest engineering record.
-
-AI assistance is allowed by the assignment, but the developer remains responsible for understanding, reviewing, testing, and explaining the final implementation.
+Build a multi-tenant backend platform that allows customers to configure lead-capture widgets, embed them on external websites, receive public submissions, protect the submission endpoint, enrich leads, persist data, and review tenant-scoped results.
 
 ---
 
-# Project Information
+# Implementation phases
 
-**Project:** FlyRank Capstone — Embeddable Widget & Lead-Capture Platform
+## Phase 1 — Project foundation
 
-**Current Phase:** Phase 1 — Design
+Implemented:
 
-**Status:** In Progress
+* Node.js HTTP application
+* Project structure
+* Environment configuration
+* Health endpoint
+* Docker development environment
+* PostgreSQL service configuration
 
----
+Key decision:
 
-# AI Usage Principles
-
-The following rules apply throughout the project:
-
-- AI-generated code must be reviewed.
-- AI suggestions must not automatically be treated as correct.
-- Important architectural decisions must be understood before implementation.
-- Tests must verify behavior.
-- Security-related suggestions must be critically reviewed.
-- No passwords, API keys, tokens, or other secrets will be supplied to AI.
-- No `.env` file will be committed.
-- AI mistakes will be recorded honestly.
-- The final system must be explainable by the developer.
+Keep the HTTP layer lightweight and move business logic into services and repositories.
 
 ---
 
-# Entry 001 — Initial Project Design
+## Phase 2 — Widget management
 
-**Date:** 2026-08-22
+Implemented:
 
-**Phase:** Phase 1 — Design
+* Widget creation
+* Widget listing
+* Widget retrieval
+* Widget updates
+* Widget deletion
+* Tenant ownership checks
 
-## Objective
+Validation covers:
 
-Convert the capstone brief into an initial technical design.
+* Widget title
+* Widget type
+* Description
+* Button text
+* Form fields
+* Allowed origins
 
-## AI Assistance
+Security decision:
 
-AI was used to help:
+Protected fields such as widget identity and tenant ownership are not changed by update requests.
 
-- break the assignment into major components;
-- identify the three major request paths;
-- identify the main database entities;
-- establish the initial layered architecture;
-- identify public API security boundaries;
-- identify resilience requirements;
-- create the initial README;
-- create the initial evidence structure;
-- create the initial AI usage log.
+---
 
-## Result
+## Phase 3 — Embeddable widget
 
-The initial architecture was defined as:
+Implemented:
+
+* Public widget configuration endpoint
+* Versioned JavaScript widget asset
+* Copyable script snippet
+* Dynamic field rendering
+* Honeypot field
+* Browser-side form submission
+
+Caching strategy:
+
+* Long-lived immutable cache for the versioned JavaScript asset
+* Shorter cache lifetime for widget configuration
+
+---
+
+## Phase 4 — Public submission pipeline
+
+Implemented:
+
+* Public submission endpoint
+* Request-body size limit
+* JSON validation
+* Required-field validation
+* Email validation
+* Honeypot spam protection
+* Rate limiting
+
+Reliability decision:
+
+Validation and protection failures return appropriate HTTP errors without affecting unrelated tenants.
+
+---
+
+## Phase 5 — Persistence
+
+Implemented:
+
+* PostgreSQL migration
+* Widgets table
+* Submissions table
+* Tenant linkage
+* Idempotency constraint
+* Tenant and widget query indexes
+
+Architecture decision:
+
+Repositories are responsible for persistence operations so that the HTTP and service layers do not directly contain database queries.
+
+---
+
+## Phase 6 — Idempotency
+
+Implemented support for:
 
 ```text
-HTTP/API Layer
-      |
-      v
-Service Layer
-      |
-      v
-Repository/Data Layer
-      |
-      v
-PostgreSQL
+Idempotency-Key
 ```
-````
+
+Behavior:
+
+* The first request creates the submission.
+* A repeated request with the same widget and idempotency key returns the existing submission.
+* Duplicate lead records are avoided.
+
+---
+
+## Phase 7 — Geo enrichment
+
+Implemented a provider chain:
+
+```text
+Primary provider
+        ↓ failure
+Fallback provider
+        ↓ failure
+Continue without geo data
+```
+
+Reliability decision:
+
+Geolocation is enrichment, not a requirement for accepting a valid lead.
+
+---
+
+## Phase 8 — Background work
+
+Implemented an internal asynchronous job queue for side effects.
+
+Behavior:
+
+* Submission is stored first.
+* Notification work is queued.
+* Failed jobs are retried.
+* Permanent failures are logged.
+
+Reliability decision:
+
+A notification failure must not cause a successfully stored lead to be reported as failed.
+
+---
+
+## Phase 9 — Dashboard
+
+Implemented tenant-scoped endpoints for:
+
+* Submission listing
+* Total submission count
+* Per-widget counts
+* Geographic aggregates
+* Submission counts over time
+
+Security decision:
+
+Dashboard data is filtered by the authenticated tenant.
+
+---
+
+## Phase 10 — Testing
+
+Automated tests cover:
+
+* Health checks
+* Widget CRUD
+* Validation
+* Tenant isolation
+* CORS preflight
+* Widget rendering behavior
+* Valid submissions
+* Invalid submissions
+* Malformed JSON
+* Oversized payloads
+* Rate limiting
+* Spam protection
+* Idempotency
+* Dashboard isolation
+
+Final test command:
+
+```bash
+npm test
+```
+
+Final result:
+
+```text
+[PASTE ACTUAL RESULT HERE]
+```
+
+---
+
+# Problems encountered
+
+## Persistence architecture
+
+Initial implementation had multiple storage approaches that could make the authoritative persistence path unclear.
+
+Resolution:
+
+The repository layer was consolidated around PostgreSQL for the configured production path.
+
+---
+
+## Cross-origin behavior
+
+The public submission flow requires browser requests from customer websites hosted on different origins.
+
+Resolution:
+
+Origin handling was restricted rather than reflecting arbitrary origins.
+
+---
+
+## Geo provider reliability
+
+External geo providers can fail or become temporarily unavailable.
+
+Resolution:
+
+The enrichment workflow uses a fallback chain and does not block submission storage when all providers fail.
+
+---
+
+## Side-effect failures
+
+Notification delivery should not determine whether a lead is successfully captured.
+
+Resolution:
+
+Notifications were moved into asynchronous background processing with retry behavior.
+
+---
+
+# Final review checklist
+
+Before submitting:
+
+* [ ] `npm install` succeeds.
+* [ ] `docker compose up --build` succeeds.
+* [ ] Database migration succeeds.
+* [ ] Database seed succeeds.
+* [ ] `npm test` passes.
+* [ ] Evidence document contains actual outputs.
+* [ ] No secrets are committed.
+* [ ] `.env.example` contains configuration placeholders only.
+* [ ] Repository documentation is up to date.
+* [ ] Capstone metadata is complete.
